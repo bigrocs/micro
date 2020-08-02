@@ -3,14 +3,14 @@ package server
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 
 	"github.com/micro/cli/v2"
 	"github.com/micro/go-micro/v2"
 	"github.com/micro/go-micro/v2/config/cmd"
 	log "github.com/micro/go-micro/v2/logger"
 	gorun "github.com/micro/go-micro/v2/runtime"
-	handler "github.com/micro/go-micro/v2/util/file"
 	"github.com/micro/micro/v2/internal/platform"
 	"github.com/micro/micro/v2/internal/update"
 )
@@ -20,16 +20,18 @@ var (
 	services = []string{
 		// runtime services
 		"config",   // ????
-		"auth",     // :8010
 		"network",  // :8085
 		"runtime",  // :8088
 		"registry", // :8000
 		"broker",   // :8001
 		"store",    // :8002
+		"tunnel",   // :8083
 		"router",   // :8084
+		"monitor",  // :????
 		"debug",    // :????
 		"proxy",    // :8081
 		"api",      // :8080
+		"auth",     // :8010
 		"web",      // :8082
 		"bot",      // :????
 		"init",     // no port, manage self
@@ -56,11 +58,6 @@ func Commands(options ...micro.Option) []*cli.Command {
 			&cli.BoolFlag{
 				Name:  "peer",
 				Usage: "Peer with the global network to share services",
-			},
-			&cli.StringFlag{
-				Name:    "profile",
-				Usage:   "Set the runtime profile to use for services e.g local, kubernetes, platform",
-				EnvVars: []string{"MICRO_RUNTIME_PROFILE"},
 			},
 		},
 		Action: func(ctx *cli.Context) error {
@@ -90,19 +87,13 @@ func Run(context *cli.Context) error {
 		cli.ShowSubcommandHelp(context)
 		os.Exit(1)
 	}
-	// set default profile
-	if len(context.String("profile")) == 0 {
-		context.Set("profile", "server")
-	}
 
 	// get the network flag
 	peer := context.Bool("peer")
 
 	// pass through the environment
 	// TODO: perhaps don't do this
-	env := []string{"MICRO_STORE=file"}
-	env = append(env, "MICRO_RUNTIME_PROFILE="+context.String("profile"))
-	env = append(env, os.Environ()...)
+	env := os.Environ()
 
 	// connect to the network if specified
 	if peer {
@@ -127,13 +118,8 @@ func Run(context *cli.Context) error {
 
 	// Use default update notifier
 	if context.Bool("auto_update") {
-		updateURL := context.String("update_url")
-		if len(updateURL) == 0 {
-			updateURL = update.DefaultURL
-		}
-
 		options := []gorun.Option{
-			gorun.WithScheduler(update.NewScheduler(updateURL, platform.Version)),
+			gorun.WithScheduler(update.NewScheduler(platform.Version)),
 		}
 		(*muRuntime).Init(options...)
 	}
@@ -146,20 +132,13 @@ func Run(context *cli.Context) error {
 		}
 
 		log.Infof("Registering %s", name)
-		// @todo this is a hack
-		envs := env
-		switch service {
-		case "proxy", "web", "api":
-			envs = append(envs, "MICRO_AUTH=service")
-		}
 
 		// runtime based on environment we run the service in
 		args := []gorun.CreateOption{
 			gorun.WithCommand(os.Args[0]),
 			gorun.WithArgs(service),
-			gorun.WithEnv(envs),
+			gorun.WithEnv(env),
 			gorun.WithOutput(os.Stdout),
-			gorun.WithRetries(10),
 		}
 
 		// NOTE: we use Version right now to check for the latest release
@@ -169,6 +148,9 @@ func Run(context *cli.Context) error {
 			return err
 		}
 	}
+
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
 
 	log.Info("Starting service runtime")
 
@@ -189,10 +171,6 @@ func Run(context *cli.Context) error {
 		micro.Address(Address),
 	)
 
-	// @todo make this configurable
-	uploadDir := filepath.Join(os.TempDir(), "micro", "uploads")
-	os.MkdirAll(uploadDir, 0777)
-	handler.RegisterHandler(server.Server(), uploadDir)
 	// start the server
 	server.Run()
 
